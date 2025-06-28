@@ -6,19 +6,47 @@ use crossterm::{
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use rand::Rng;
+use std::collections::HashMap;
 use std::io::{stdout, Write};
 use std::time::Duration;
 
 // --- Character Generation ---
-static CHARACTERS: once_cell::sync::Lazy<Vec<char>> = once_cell::sync::Lazy::new(|| {
-    (0x4E00..=0x9FA5)
-        .filter_map(std::char::from_u32)
-        .collect()
+static ALL_CHAR_SETS: once_cell::sync::Lazy<HashMap<String, Vec<char>>> = once_cell::sync::Lazy::new(|| {
+    let mut map = HashMap::new();
+
+    // English Character Set
+    let mut english_chars = Vec::new();
+    english_chars.extend('a'..='z');
+    english_chars.extend('A'..='Z');
+    english_chars.extend('0'..='9');
+    english_chars.extend("!@#$%^&*()_+-=[]{}|;:',.<>/?`~".chars());
+    map.insert("English".to_string(), english_chars);
+
+    // Traditional Chinese Character Set (Common CJK Unified Ideographs)
+    let mut traditional_chinese_chars = Vec::new();
+    for i in 0x4E00..=0x9FA5 {
+        if let Some(c) = std::char::from_u32(i) {
+            traditional_chinese_chars.push(c);
+        }
+    }
+    map.insert("Traditional Chinese".to_string(), traditional_chinese_chars);
+
+    // Simplified Chinese Character Set (Broader CJK Unified Ideographs)
+    let mut simplified_chinese_chars = Vec::new();
+    for i in 0x4E00..=0x9FFF {
+        if let Some(c) = std::char::from_u32(i) {
+            simplified_chinese_chars.push(c);
+        }
+    }
+    map.insert("Simplified Chinese".to_string(), simplified_chinese_chars);
+
+    map
 });
 
-fn get_random_char() -> char {
+fn get_random_char(language_key: &str) -> char {
     let mut rng = rand::thread_rng();
-    CHARACTERS[rng.gen_range(0..CHARACTERS.len())]
+    let char_set = ALL_CHAR_SETS.get(language_key).unwrap();
+    char_set[rng.gen_range(0..char_set.len())]
 }
 
 // --- Configuration & State ---
@@ -39,6 +67,7 @@ const THEMES: [ColorScheme; 4] = [
 struct Config {
     theme_index: usize,
     speed_level: usize, // 1-10
+    language_index: usize,
 }
 
 const SPEED_DURATIONS: [u64; 10] = [100, 88, 76, 64, 52, 40, 33, 28, 24, 20];
@@ -94,7 +123,7 @@ impl Column {
         self.counter = 0;
     }
 
-    fn update(&mut self, colors: &ColorScheme) {
+    fn update(&mut self, colors: &ColorScheme, language_key: &str) {
         self.counter += 1;
         if self.counter < self.speed {
             return;
@@ -123,7 +152,7 @@ impl Column {
         if self.head >= 0 && self.head < self.cells.len() as i16 {
             let head_idx = self.head as usize;
             self.cells[head_idx] = Cell {
-                char: get_random_char(),
+                char: get_random_char(language_key),
                 color: colors.head,
                 lifetime: self.len,
             };
@@ -150,10 +179,12 @@ impl Column {
 }
 
 // --- UI Drawing ---
-fn draw_ui(text: &str, stdout: &mut std::io::Stdout) -> std::io::Result<()> {
+fn draw_ui(text: &str, stdout: &mut std::io::Stdout, clear_screen: bool) -> std::io::Result<()> {
+    if clear_screen {
+        execute!(stdout, Clear(ClearType::All))?;
+    }
     execute!(
         stdout,
-        Clear(ClearType::All),
         cursor::MoveTo(0, 0),
         SetForegroundColor(Color::White),
         Print(text)
@@ -171,7 +202,9 @@ fn main() -> std::io::Result<()> {
 
     let mut columns: Vec<Column> = (0..width / 2).map(|x| Column::new(x, height)).collect();
     let mut app_state = AppState::Matrix;
-    let mut config = Config { theme_index: 0, speed_level: 5 };
+    let mut config = Config { theme_index: 0, speed_level: 5, language_index: 0 }; // Default to English
+
+    let language_keys: Vec<String> = ALL_CHAR_SETS.keys().cloned().collect();
 
     loop {
         match app_state {
@@ -180,7 +213,7 @@ fn main() -> std::io::Result<()> {
                     if let Event::Key(key) = event::read()? {
                         match key.code {
                             KeyCode::Char('q') | KeyCode::Esc => break,
-                            KeyCode::Char('p') => app_state = AppState::Paused,
+                            KeyCode::Char(' ') => app_state = AppState::Paused,
                             KeyCode::Char('c') => app_state = AppState::Config,
                             _ => {},
                         }
@@ -189,18 +222,20 @@ fn main() -> std::io::Result<()> {
 
                 execute!(stdout, Clear(ClearType::All))?;
                 let colors = &THEMES[config.theme_index];
+                let current_language_key = &language_keys[config.language_index];
                 for col in columns.iter_mut() {
-                    col.update(colors);
+                    col.update(colors, current_language_key);
                     col.draw(&mut stdout);
                 }
                 stdout.flush()?;
             }
             AppState::Paused => {
-                draw_ui("Paused - Press 'p' to resume or 'q' to quit", &mut stdout)?;
+                // Do not clear screen, just overlay message
+                draw_ui("Paused - Press SPACE to resume or 'q' to quit", &mut stdout, false)?;
                 if let Event::Key(key) = event::read()? {
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => break,
-                        KeyCode::Char('p') => app_state = AppState::Matrix,
+                        KeyCode::Char(' ') => app_state = AppState::Matrix,
                         _ => {},
                     }
                 }
@@ -213,12 +248,15 @@ fn main() -> std::io::Result<()> {
                     3 => "Cyberpunk",
                     _ => "Unknown",
                 };
+                let current_language_name = &language_keys[config.language_index];
+
                 let menu_text = format!(
-                    "Configuration Menu\n\nSpeed: {} (use +/- to change)\nTheme: {} (use left/right arrows to change)\n\nPress 'c' or 'Esc': Return to matrix",
+                    "Configuration Menu\n\nSpeed: {} (use +/- to change)\nTheme: {} (use left/right arrows to change)\nLanguage: {} (use up/down arrows to change)\n\nPress 'c' or 'Esc': Return to matrix",
                     config.speed_level,
-                    theme_name
+                    theme_name,
+                    current_language_name
                 );
-                draw_ui(&menu_text, &mut stdout)?;
+                draw_ui(&menu_text, &mut stdout, true)?;
 
                 if let Event::Key(key) = event::read()? {
                     match key.code {
@@ -237,6 +275,16 @@ fn main() -> std::io::Result<()> {
                                 THEMES.len() - 1
                             } else {
                                 config.theme_index - 1
+                            };
+                        }
+                        KeyCode::Up => {
+                            config.language_index = (config.language_index + 1) % language_keys.len();
+                        }
+                        KeyCode::Down => {
+                            config.language_index = if config.language_index == 0 {
+                                language_keys.len() - 1
+                            } else {
+                                config.language_index - 1
                             };
                         }
                         _ => {},
